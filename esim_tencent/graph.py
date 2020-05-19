@@ -1,17 +1,18 @@
 import tensorflow as tf
-from esim import args
+import numpy as np
+from esim_tencent import args
 
 
 class Graph:
 
-    def __init__(self):
+    def __init__(self, embedding=np.zeros((args.vocab_size, args.word_embedding_size))):
         self.p = tf.placeholder(dtype=tf.int32, shape=(None, args.seq_length), name='p')
         self.h = tf.placeholder(dtype=tf.int32, shape=(None, args.seq_length), name='h')
         self.y = tf.placeholder(dtype=tf.int32, shape=None, name='y')
         self.keep_prob = tf.placeholder(dtype=tf.float32, name='drop_rate')
 
-        self.embedding = tf.get_variable(dtype=tf.float32, shape=(args.vocab_size, args.char_embedding_size),
-                                         name='embedding')
+        # self.embedding1 = tf.get_variable(dtype=tf.float32, shape=(args.vocab_size, args.word_embedding_size), name='embedding')
+        self.embedding = tf.constant(embedding, dtype=tf.float32, name='embedding')
 
         self.forward()
 

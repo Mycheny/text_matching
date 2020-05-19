@@ -1,6 +1,6 @@
 class_size = 2
 char_embedding_len = 100
-word_embedding_len = 100
+word_embedding_len = 200
 
 max_char_len = 15
 max_word_len = 15

@@ -1,6 +1,6 @@
 seq_length = 15
 
-char_embedding_size = 100
+word_embedding_size = 200
 
 embedding_hidden_size = 512
 context_hidden_size = 256

@@ -1,16 +1,155 @@
 import os
 import sys
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '../'))
+import gensim
+import jieba
 
-from esim.graph import Graph
+sys.path.append(os.path.join(os.path.dirname(__file__), '../'))
+import re
+from esim_tencent.graph import Graph
 import tensorflow as tf
-from utils.load_data import load_char_data
-from esim import args
+import numpy as np
+from esim_tencent import args
+import pandas as pd
+from tqdm import tqdm
+
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-p, h, y = load_char_data('input/train.csv', data_size=None)
-p_eval, h_eval, y_eval = load_char_data('input/dev.csv', data_size=1000)
+import platform
+
+
+def add_words(f):
+    for ln in tqdm(f, desc="jieba add words"):
+        if len(ln)<2 or len(ln)>5:
+            continue
+        line = ln.strip()
+        if not isinstance(line, jieba.text_type):
+            try:
+                line = line.decode('utf-8').lstrip('\ufeff')
+            except UnicodeDecodeError:
+                raise ValueError('dictionary file %s must be utf-8')
+        if not line:
+            continue
+        # match won't be None because there's at least one character
+        word, freq, tag = jieba.re_userdict.match(line).groups()
+        if freq is not None:
+            freq = freq.strip()
+        if tag is not None:
+            tag = tag.strip()
+        jieba.add_word(word, freq, tag)
+
+if platform.system()=='Windows':
+    ChineseEmbedding_path = r"E:/DATA/tencent/ChineseEmbedding.bin"
+elif platform.system()=='Linux':
+    ChineseEmbedding_path = r"/stor/wcy/tencent/ChineseEmbedding.bin"
+else:
+    sys.exit(0)
+
+
+def w2v(word, model):
+    try:
+        return model.wv[word]
+    except:
+        return np.zeros(args.word_embedding_size)
+
+
+def shuffle(*arrs):
+    arrs = list(arrs)
+    for i, arr in enumerate(arrs):
+        assert len(arrs[0]) == len(arrs[i])
+        arrs[i] = np.array(arr)
+    p = np.random.permutation(len(arrs[0]))
+    return tuple(arr[p] for arr in arrs)
+
+
+def pad_sequences(sequences, maxlen=None, dtype='int32', padding='post',
+                  truncating='post', value=0.):
+    """ pad_sequences
+
+    把序列长度转变为一样长的，如果设置了maxlen则长度统一为maxlen，如果没有设置则默认取
+    最大的长度。填充和截取包括两种方法，post与pre，post指从尾部开始处理，pre指从头部
+    开始处理，默认都是从尾部开始。
+
+    Arguments:
+        sequences: 序列
+        maxlen: int 最大长度
+        dtype: 转变后的数据类型
+        padding: 填充方法'pre' or 'post'
+        truncating: 截取方法'pre' or 'post'
+        value: float 填充的值
+
+    Returns:
+        x: numpy array 填充后的序列维度为 (number_of_sequences, maxlen)
+
+    """
+    lengths = [len(s) for s in sequences]
+
+    nb_samples = len(sequences)
+    if maxlen is None:
+        maxlen = np.max(lengths)
+
+    x = (np.ones((nb_samples, maxlen)) * value).astype(dtype)
+    for idx, s in enumerate(sequences):
+        if len(s) == 0:
+            continue  # empty list was found
+        if truncating == 'pre':
+            trunc = s[-maxlen:]
+        elif truncating == 'post':
+            trunc = s[:maxlen]
+        else:
+            raise ValueError("Truncating type '%s' not understood" % padding)
+
+        if padding == 'post':
+            x[idx, :len(trunc)] = trunc
+        elif padding == 'pre':
+            x[idx, -len(trunc):] = trunc
+        else:
+            raise ValueError("Padding type '%s' not understood" % padding)
+    return x
+
+
+def word_index(p_sentences, h_sentences, idx2word):
+    word2idx = {v: i for i, v in enumerate(idx2word)}
+
+    p_list, h_list = [], []
+    for p_sentence, h_sentence in zip(p_sentences, h_sentences):
+        p = [word2idx[word.lower()] for word in p_sentence if len(word.strip()) > 0 and word.lower() in word2idx.keys()]
+        h = [word2idx[word.lower()] for word in h_sentence if len(word.strip()) > 0 and word.lower() in word2idx.keys()]
+
+        p_list.append(p)
+        h_list.append(h)
+
+    p_list = pad_sequences(p_list, maxlen=args.seq_length)
+    h_list = pad_sequences(h_list, maxlen=args.seq_length)
+
+    return p_list, h_list
+
+
+# 加载char_index、静态词向量、动态词向量的训练数据
+def load_all_data(path, index2word, data_size=None):
+    df = pd.read_csv(path)
+    p = df['sentence1'].values[0:data_size]
+    h = df['sentence2'].values[0:data_size]
+    label = df['label'].values[0:data_size]
+
+    p, h, label = shuffle(p, h, label)
+
+    p_seg = list(map(lambda x: list(jieba.cut(re.sub("[！，。？、~@#￥%&*（）.,:：|/`()_;+；…\\\\\\-\\s]", "", x))), p))
+    h_seg = list(map(lambda x: list(jieba.cut(re.sub("[！，。？、~@#￥%&*（）.,:：|/`()_;+；…\\\\\\-\\s]", "", x))), h))
+
+    p_w_index, h_w_index = word_index(p_seg, h_seg, index2word)
+
+    return p_w_index, h_w_index, label
+
+
+vectors_model = gensim.models.KeyedVectors.load(ChineseEmbedding_path, mmap='r')
+num = 500000
+vectors_model.index2entity = vectors_model.index2entity[:num]
+vectors_model.index2word = vectors_model.index2word[:num]
+vectors_model.vectors = vectors_model.vectors[:num]
+add_words(vectors_model.index2word)
+p, h, y = load_all_data('../input/train.csv', vectors_model.index2word, data_size=None)
+p_eval, h_eval, y_eval = load_all_data('../input/dev.csv', vectors_model.index2word, data_size=1000)
 
 p_holder = tf.placeholder(dtype=tf.int32, shape=(None, args.seq_length), name='p')
 h_holder = tf.placeholder(dtype=tf.int32, shape=(None, args.seq_length), name='h')
@@ -21,7 +160,7 @@ dataset = dataset.batch(args.batch_size).repeat(args.epochs)
 iterator = dataset.make_initializable_iterator()
 next_element = iterator.get_next()
 
-model = Graph()
+model = Graph(embedding=vectors_model.vectors)
 saver = tf.train.Saver()
 
 config = tf.ConfigProto()
@@ -49,4 +188,4 @@ with tf.Session(config=config)as sess:
                                                   model.keep_prob: 1})
         print('loss_eval: ', loss_eval, ' acc_eval:', acc_eval)
         print('\n')
-        saver.save(sess, f'../output/esim/esim_{epoch}.ckpt')
+        saver.save(sess, f'../output/esim/esim_tencent{epoch}.ckpt')

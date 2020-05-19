@@ -1,3 +1,4 @@
+import gensim
 import pandas as pd
 import os
 from utils.data_utils import shuffle, pad_sequences
@@ -145,7 +146,8 @@ def load_char_word_dynamic_data(path, data_size=None):
 
 # 加载char_index、静态词向量、动态词向量的训练数据
 def load_all_data(path, data_size=None):
-    model = Word2Vec.load('../output/word2vec/word2vec.model')
+    # model = Word2Vec.load('../output/word2vec/word2vec.model')
+    model = gensim.models.KeyedVectors.load(r'E:\\DATA\\tencent\\ChineseEmbedding.bin', mmap='r')
     df = pd.read_csv(path)
     p = df['sentence1'].values[0:data_size]
     h = df['sentence2'].values[0:data_size]
