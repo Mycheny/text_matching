@@ -82,3 +82,4 @@ class Graph:
         self.train_op = tf.train.AdamOptimizer(args.learning_rate).minimize(self.loss)
         correct_prediction = tf.equal(tf.cast(self.prediction, tf.int32), self.y)
         self.acc = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+        self.confusion_matrix = tf.confusion_matrix(tf.argmax(tf.nn.softmax(logits), 1), tf.argmax(y, 1), num_classes=2)

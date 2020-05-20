@@ -1,3 +1,4 @@
+import csv
 import os
 import sys
 
@@ -18,9 +19,9 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import platform
 
 
-def add_words(f):
+def jieba_add_words(f):
     for ln in tqdm(f, desc="jieba add words"):
-        if len(ln)<2 or len(ln)>5:
+        if len(ln) < 2 or len(ln) > 5:
             continue
         line = ln.strip()
         if not isinstance(line, jieba.text_type):
@@ -38,9 +39,10 @@ def add_words(f):
             tag = tag.strip()
         jieba.add_word(word, freq, tag)
 
-if platform.system()=='Windows':
+
+if platform.system() == 'Windows':
     ChineseEmbedding_path = r"E:/DATA/tencent/ChineseEmbedding.bin"
-elif platform.system()=='Linux':
+elif platform.system() == 'Linux':
     ChineseEmbedding_path = r"/stor/wcy/tencent/ChineseEmbedding.bin"
 else:
     sys.exit(0)
@@ -127,10 +129,21 @@ def word_index(p_sentences, h_sentences, idx2word):
 
 # 加载char_index、静态词向量、动态词向量的训练数据
 def load_all_data(path, index2word, data_size=None):
-    df = pd.read_csv(path)
+    df = pd.read_csv(path, sep='\t', error_bad_lines=False, quoting=csv.QUOTE_NONE)
     p = df['sentence1'].values[0:data_size]
     h = df['sentence2'].values[0:data_size]
     label = df['label'].values[0:data_size]
+
+    loc1 = label == 0
+    loc2 = label == 1
+    p = np.concatenate((p[loc1], p[loc2]))
+    h = np.concatenate((h[loc1], h[loc2]))
+    label = np.concatenate((label[loc1], label[loc2]))
+    pro = label.sum() / (1 - label).sum()
+    if pro < 0.5:
+        p = p[int(len(p[loc1]) * (1 - pro)):]
+        h = h[int(len(h[loc1]) * (1 - pro)):]
+        label = label[int(len(label[loc1]) * (1 - pro)):]
 
     p, h, label = shuffle(p, h, label)
 
@@ -142,50 +155,60 @@ def load_all_data(path, index2word, data_size=None):
     return p_w_index, h_w_index, label
 
 
-vectors_model = gensim.models.KeyedVectors.load(ChineseEmbedding_path, mmap='r')
-num = 500000
-vectors_model.index2entity = vectors_model.index2entity[:num]
-vectors_model.index2word = vectors_model.index2word[:num]
-vectors_model.vectors = vectors_model.vectors[:num]
-add_words(vectors_model.index2word)
-p, h, y = load_all_data('../input/train.csv', vectors_model.index2word, data_size=None)
-p_eval, h_eval, y_eval = load_all_data('../input/dev.csv', vectors_model.index2word, data_size=1000)
+if __name__ == '__main__':
+    data_types = ["ATEC", "CCKS", "LCQMC"]
+    data_type = data_types[0]
+    print(data_type)
+    data_path = f"../input/data/{data_type}/processed"
+    vectors_model = gensim.models.KeyedVectors.load(ChineseEmbedding_path, mmap='r')
+    num = 500000
+    index2word = vectors_model.index2word[:num]
+    vectors = vectors_model.vectors[:num]
+    del vectors_model  # 删除变量 释放内存
+    jieba_add_words(index2word)
+    p, h, y = load_all_data(f'{data_path}/train.tsv', index2word, data_size=None)
+    p_eval, h_eval, y_eval = load_all_data(f'{data_path}/dev.tsv', index2word, data_size=1000)
 
-p_holder = tf.placeholder(dtype=tf.int32, shape=(None, args.seq_length), name='p')
-h_holder = tf.placeholder(dtype=tf.int32, shape=(None, args.seq_length), name='h')
-y_holder = tf.placeholder(dtype=tf.int32, shape=None, name='y')
+    p_holder = tf.placeholder(dtype=tf.int32, shape=(None, args.seq_length), name='p')
+    h_holder = tf.placeholder(dtype=tf.int32, shape=(None, args.seq_length), name='h')
+    y_holder = tf.placeholder(dtype=tf.int32, shape=None, name='y')
 
-dataset = tf.data.Dataset.from_tensor_slices((p_holder, h_holder, y_holder))
-dataset = dataset.batch(args.batch_size).repeat(args.epochs)
-iterator = dataset.make_initializable_iterator()
-next_element = iterator.get_next()
+    dataset = tf.data.Dataset.from_tensor_slices((p_holder, h_holder, y_holder))
+    dataset = dataset.batch(args.batch_size).repeat(args.epochs)
+    iterator = dataset.make_initializable_iterator()
+    next_element = iterator.get_next()
 
-model = Graph(embedding=vectors_model.vectors)
-saver = tf.train.Saver()
+    model = Graph(embedding=vectors)
+    saver = tf.train.Saver()
 
-config = tf.ConfigProto()
-config.gpu_options.allow_growth = True
-config.gpu_options.per_process_gpu_memory_fraction = 0.9
+    config = tf.ConfigProto()
+    config.gpu_options.allow_growth = True
+    config.gpu_options.per_process_gpu_memory_fraction = 0.9
 
-with tf.Session(config=config)as sess:
-    sess.run(tf.global_variables_initializer())
-    sess.run(iterator.initializer, feed_dict={p_holder: p, h_holder: h, y_holder: y})
-    steps = int(len(y) / args.batch_size)
-    for epoch in range(args.epochs):
-        for step in range(steps):
-            p_batch, h_batch, y_batch = sess.run(next_element)
-            _, loss, acc = sess.run([model.train_op, model.loss, model.acc],
-                                    feed_dict={model.p: p_batch,
-                                               model.h: h_batch,
-                                               model.y: y_batch,
-                                               model.keep_prob: args.keep_prob})
-            print('epoch:', epoch, ' step:', step, ' loss: ', loss, ' acc:', acc)
+    with tf.Session(config=config)as sess:
+        sess.run(tf.global_variables_initializer())
+        sess.run(iterator.initializer, feed_dict={p_holder: p, h_holder: h, y_holder: y})
+        steps = int(len(y) / args.batch_size)
+        for epoch in range(args.epochs):
+            for step in range(steps):
+                p_batch, h_batch, y_batch = sess.run(next_element)
+                _ = sess.run([model.train_op, ], feed_dict={model.p: p_batch,
+                                                            model.h: h_batch,
+                                                            model.y: y_batch,
+                                                            model.keep_prob: args.keep_prob})
+                if step % 10 == 0:
+                    loss, acc, confusion_matrix = sess.run([model.loss, model.acc, model.confusion_matrix],
+                                         feed_dict={model.p: p_batch,
+                                                    model.h: h_batch,
+                                                    model.y: y_batch,
+                                                    model.keep_prob: args.keep_prob})
+                    print('epoch:', epoch, ' step:', f"{step}/{steps}", ' loss: ', loss, ' acc:', acc, 'cm\n', confusion_matrix)
 
-        loss_eval, acc_eval = sess.run([model.loss, model.acc],
-                                       feed_dict={model.p: p_eval,
-                                                  model.h: h_eval,
-                                                  model.y: y_eval,
-                                                  model.keep_prob: 1})
-        print('loss_eval: ', loss_eval, ' acc_eval:', acc_eval)
-        print('\n')
-        saver.save(sess, f'../output/esim/esim_tencent{epoch}.ckpt')
+            loss_eval, acc_eval, confusion_matrix_eval = sess.run([model.loss, model.acc, model.confusion_matrix],
+                                           feed_dict={model.p: p_eval,
+                                                      model.h: h_eval,
+                                                      model.y: y_eval,
+                                                      model.keep_prob: 1})
+            print('loss_eval: ', loss_eval, ' acc_eval:', acc_eval, 'cm\n', confusion_matrix_eval)
+            print('\n')
+            saver.save(sess, f'../output/esim_tencent/{data_type}/esim_tencent_{data_type}_{epoch}.ckpt')

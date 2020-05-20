@@ -1,3 +1,4 @@
+import csv
 import os
 import re
 import sys
@@ -10,19 +11,41 @@ import gensim
 import platform
 
 from esim_tencent import args
+from tqdm import tqdm
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../'))
 
-from esim.graph import Graph
-from utils.load_data import load_char_data
+from esim_tencent.graph import Graph
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+os.environ['CUDA_VISIBLE_DEVICES'] = '3'
 
-if platform.system()=='Windows':
+
+def jieba_add_words(f):
+    for ln in tqdm(f, desc="jieba add words"):
+        if len(ln) < 2 or len(ln) > 5:
+            continue
+        line = ln.strip()
+        if not isinstance(line, jieba.text_type):
+            try:
+                line = line.decode('utf-8').lstrip('\ufeff')
+            except UnicodeDecodeError:
+                raise ValueError('dictionary file %s must be utf-8')
+        if not line:
+            continue
+        # match won't be None because there's at least one character
+        word, freq, tag = jieba.re_userdict.match(line).groups()
+        if freq is not None:
+            freq = freq.strip()
+        if tag is not None:
+            tag = tag.strip()
+        jieba.add_word(word, freq, tag)
+
+
+if platform.system() == 'Windows':
     ChineseEmbedding_path = r"E:/DATA/tencent/ChineseEmbedding.bin"
-elif platform.system()=='Linux':
+elif platform.system() == 'Linux':
     ChineseEmbedding_path = r"/stor/wcy/tencent/ChineseEmbedding.bin"
 else:
     sys.exit(0)
@@ -90,8 +113,7 @@ def pad_sequences(sequences, maxlen=None, dtype='int32', padding='post',
     return x
 
 
-def word_index(p_sentences, h_sentences, model):
-    idx2word = model.index2word
+def word_index(p_sentences, h_sentences, idx2word):
     word2idx = {v: i for i, v in enumerate(idx2word)}
 
     p_list, h_list = [], []
@@ -109,35 +131,67 @@ def word_index(p_sentences, h_sentences, model):
 
 
 # 加载char_index、静态词向量、动态词向量的训练数据
-def load_all_data(path, model, data_size=None):
-    df = pd.read_csv(path)
+def load_all_data(path, index2word, data_size=None):
+    df = pd.read_csv(path, sep='\t', error_bad_lines=False, quoting=csv.QUOTE_NONE)
     p = df['sentence1'].values[0:data_size]
     h = df['sentence2'].values[0:data_size]
     label = df['label'].values[0:data_size]
+
+    loc1 = label == 0
+    loc2 = label == 1
+    p = np.concatenate((p[loc1], p[loc2]))
+    h = np.concatenate((h[loc1], h[loc2]))
+    label = np.concatenate((label[loc1], label[loc2]))
+    pro = label.sum() / (1 - label).sum()
+    if pro < 0.6:
+        p = p[int(len(p[loc1]) * (1 - pro)):]
+        h = h[int(len(h[loc1]) * (1 - pro)):]
+        label = label[int(len(label[loc1]) * (1 - pro)):]
 
     p, h, label = shuffle(p, h, label)
 
     p_seg = list(map(lambda x: list(jieba.cut(re.sub("[！，。？、~@#￥%&*（）.,:：|/`()_;+；…\\\\\\-\\s]", "", x))), p))
     h_seg = list(map(lambda x: list(jieba.cut(re.sub("[！，。？、~@#￥%&*（）.,:：|/`()_;+；…\\\\\\-\\s]", "", x))), h))
 
-    p_w_index, h_w_index = word_index(p_seg, h_seg, model)
+    p_w_index, h_w_index = word_index(p_seg, h_seg, index2word)
 
     return p_w_index, h_w_index, label
 
 
-vectors_model = gensim.models.KeyedVectors.load(ChineseEmbedding_path, mmap='r')
-p, h, y = load_char_data('ccb/test.csv', data_size=1000)
+if __name__ == '__main__':
+    data_types = ["ATEC", "CCKS", "LCQMC"]
+    data_type = data_types[2]
+    print(data_type)
+    data_path = f"../input/data/{data_type}/processed"
+    vectors_model = gensim.models.KeyedVectors.load(ChineseEmbedding_path, mmap='r')
+    num = 500000
+    index2word = vectors_model.index2word[:num]
+    vectors = vectors_model.vectors[:num]
+    del vectors_model  # 删除变量 释放内存
+    jieba_add_words(index2word)
+    ps, hs, ys = load_all_data(f'{data_path}/test.tsv', index2word, data_size=None)
 
-model = Graph()
-saver = tf.train.Saver()
+    model = Graph(embedding=vectors)
+    saver = tf.train.Saver()
 
-with tf.Session()as sess:
-    sess.run(tf.global_variables_initializer())
-    saver.restore(sess, '../output/esim/esim_12.ckpt')
-    loss, acc = sess.run([model.loss, model.acc],
-                         feed_dict={model.p: p,
-                                    model.h: h,
-                                    model.y: y,
-                                    model.keep_prob: 1})
-
-    print('loss: ', loss, ' acc:', acc)
+    with tf.Session()as sess:
+        path = tf.train.latest_checkpoint(f'../output/esim_tencent/{data_type}')
+        print(f"path {path}")
+        # path = f'../output/esim_tencent/{data_type}/esim_tencent_ATEC_48.ckpt'
+        saver.restore(sess, path)
+        batch = args.batch_size
+        CM = np.zeros((2, 2), np.int32)
+        for i in tqdm(range(int(len(ys) / batch) + 1)):
+            p = ps[i * batch:(i + 1) * batch]
+            h = hs[i * batch:(i + 1) * batch]
+            y = ys[i * batch:(i + 1) * batch]
+            if len(y) == 0:
+                break
+            loss, acc, confusion_matrix = sess.run([model.loss, model.acc, model.confusion_matrix],
+                                     feed_dict={model.p: p,
+                                                model.h: h,
+                                                model.y: y,
+                                                model.keep_prob: 1})
+            CM += confusion_matrix
+            print('loss: ', loss, ' acc:', acc, 'cm\n', confusion_matrix)
+        print(CM)
